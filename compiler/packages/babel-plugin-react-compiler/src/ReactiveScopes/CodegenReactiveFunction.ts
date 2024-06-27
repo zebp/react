@@ -16,6 +16,7 @@ import {
   GeneratedSource,
   Identifier,
   IdentifierId,
+  InstructionId,
   InstructionKind,
   JsxAttribute,
   ObjectMethod,
@@ -29,7 +30,9 @@ import {
   ReactiveScope,
   ReactiveScopeBlock,
   ReactiveScopeDependency,
+  ReactiveStatement,
   ReactiveTerminal,
+  ReactiveTerminalStatement,
   ReactiveValue,
   SourceLocation,
   SpreadPattern,
@@ -44,7 +47,13 @@ import { GuardKind } from "../Utils/RuntimeDiagnosticConstants";
 import { assertExhaustive } from "../Utils/utils";
 import { buildReactiveFunction } from "./BuildReactiveFunction";
 import { SINGLE_CHILD_FBT_TAGS } from "./MemoizeFbtAndMacroOperandsInSameScope";
-import { ReactiveFunctionVisitor, visitReactiveFunction } from "./visitors";
+import {
+  ReactiveFunctionTransform,
+  ReactiveFunctionVisitor,
+  Transformed,
+  TransformedValue,
+  visitReactiveFunction,
+} from "./visitors";
 
 export const MEMO_CACHE_SENTINEL = "react.memo_cache_sentinel";
 export const EARLY_RETURN_SENTINEL = "react.early_return_sentinel";
@@ -397,6 +406,131 @@ class Context {
   }
 }
 
+class RecomputationVisitor extends ReactiveFunctionTransform<
+  Map<IdentifierId, Identifier>
+> {
+  #cx: Context;
+
+  constructor(cx: Context) {
+    super();
+    this.#cx = cx;
+  }
+
+  override visitLValue(
+    _id: InstructionId,
+    place: Place,
+    state: Map<IdentifierId, Identifier>
+  ): void {
+    const origId = place.identifier.id;
+    let identifier = state.get(origId);
+    if (identifier == null) {
+      const id = this.#cx.env.nextIdentifierId;
+      const nameStr = this.#cx.synthesizeName(
+        `${place.identifier.name?.value ?? "temp"}${id}idem`
+      );
+      const name =
+        place.identifier.name != null
+          ? { kind: place.identifier.name.kind, value: nameStr }
+          : null;
+      identifier = { ...place.identifier, name, id };
+      state.set(origId, identifier);
+    }
+    place.identifier = identifier;
+  }
+
+  override visitPlace(
+    _id: InstructionId,
+    place: Place,
+    state: Map<IdentifierId, Identifier>
+  ): void {
+    const identifier = state.get(place.identifier.id);
+    if (identifier != null) {
+      place.identifier = identifier;
+    }
+  }
+
+  override transformInstruction(
+    instruction: ReactiveInstruction,
+    state: Map<IdentifierId, Identifier>
+  ): Transformed<ReactiveStatement> {
+    const newInstruction = { ...instruction };
+    switch (newInstruction.value.kind) {
+      case "DeclareLocal":
+      case "StoreLocal":
+        if (newInstruction.value.lvalue.kind === InstructionKind.Reassign) {
+          const newLValue = {
+            ...newInstruction.value.lvalue,
+            kind: InstructionKind.Const,
+          };
+          const newValue = { ...newInstruction.value, lvalue: newLValue };
+          newInstruction.value = newValue;
+        }
+    }
+    this.visitInstruction(newInstruction, state);
+    return {
+      kind: "replace",
+      value: { kind: "instruction", instruction: newInstruction },
+    };
+  }
+
+  override transformPrunedScope(
+    scope: PrunedReactiveScopeBlock,
+    state: Map<IdentifierId, Identifier>
+  ): Transformed<ReactiveStatement> {
+    const newScope = { ...scope };
+    this.visitPrunedScope(newScope, state);
+    return { kind: "replace", value: newScope };
+  }
+
+  override transformReactiveFunctionValue(
+    id: InstructionId,
+    dependencies: Array<Place>,
+    fn: ReactiveFunction,
+    state: Map<IdentifierId, Identifier>
+  ): { kind: "keep" } | { kind: "replace"; value: ReactiveFunction } {
+    const newFn = { ...fn };
+    this.visitReactiveFunctionValue(id, dependencies, newFn, state);
+    return { kind: "replace", value: newFn };
+  }
+
+  override transformScope(
+    scope: ReactiveScopeBlock,
+    state: Map<IdentifierId, Identifier>
+  ): Transformed<ReactiveStatement> {
+    const newScope = { ...scope };
+    this.visitScope(newScope, state);
+    return { kind: "replace", value: newScope };
+  }
+
+  override transformTerminal(
+    stmt: ReactiveTerminalStatement,
+    state: Map<IdentifierId, Identifier>
+  ): Transformed<ReactiveStatement> {
+    const newStmt = { ...stmt };
+    this.visitTerminal(newStmt, state);
+    return { kind: "replace", value: newStmt };
+  }
+
+  override transformValue(
+    id: InstructionId,
+    value: ReactiveValue,
+    state: Map<IdentifierId, Identifier>
+  ): TransformedValue {
+    const newValue = { ...value };
+    this.visitValue(id, newValue, state);
+    return { kind: "replace", value: newValue };
+  }
+}
+
+function codegenRecomputationBlock(
+  cx: Context,
+  block: ReactiveBlock
+): [t.BlockStatement, Map<IdentifierId, Identifier>] {
+  const renameMap = new Map<IdentifierId, Identifier>();
+  new RecomputationVisitor(cx).traverseBlock(block, renameMap);
+  return [codegenBlock(cx, block), renameMap];
+}
+
 function codegenBlock(cx: Context, block: ReactiveBlock): t.BlockStatement {
   const temp = new Map(cx.temp);
   const result = codegenBlockNoReset(cx, block);
@@ -508,6 +642,7 @@ function codegenReactiveScope(
   const cacheLoadStatements: Array<t.Statement> = [];
   const cacheLoads: Array<{
     name: t.Identifier;
+    id: IdentifierId;
     index: number;
     value: t.Expression;
   }> = [];
@@ -579,7 +714,12 @@ function codegenReactiveScope(
         t.variableDeclaration("let", [t.variableDeclarator(name)])
       );
     }
-    cacheLoads.push({ name, index, value: wrapCacheDep(cx, name) });
+    cacheLoads.push({
+      name,
+      id: identifier.id,
+      index,
+      value: wrapCacheDep(cx, name),
+    });
     cx.declare(identifier);
   }
   for (const reassignment of scope.reassignments) {
@@ -589,7 +729,12 @@ function codegenReactiveScope(
     }
     const name = convertIdentifier(reassignment);
     outputComments.push(name.name);
-    cacheLoads.push({ name, index, value: wrapCacheDep(cx, name) });
+    cacheLoads.push({
+      name,
+      id: reassignment.id,
+      index,
+      value: wrapCacheDep(cx, name),
+    });
   }
 
   let testCondition = (changeExpressions as Array<t.Expression>).reduce(
@@ -653,8 +798,10 @@ function codegenReactiveScope(
     const cacheLoadOldValueStatements: Array<t.Statement> = [];
     const changeDetectionStatements: Array<t.Statement> = [];
     const idempotenceDetectionStatements: Array<t.Statement> = [];
+    const [idempotenceComputationBlock, idemRenameMap] =
+      codegenRecomputationBlock(cx, block);
 
-    for (const { name, index, value } of cacheLoads) {
+    for (const { name, id, index, value } of cacheLoads) {
       const loadName = cx.synthesizeName(`old$${name.name}`);
       const slot = t.memberExpression(
         t.identifier(cx.synthesizeName("$")),
@@ -681,11 +828,20 @@ function codegenReactiveScope(
           ])
         )
       );
+
+      const renamed = idemRenameMap.get(id);
+      CompilerError.invariant(renamed != null, {
+        reason: `Expected changed variable to be present in rename map`,
+        loc: null,
+        description: null,
+        suggestions: null,
+      });
+
       idempotenceDetectionStatements.push(
         t.expressionStatement(
           t.callExpression(t.identifier(detectionFunction), [
             slot,
-            name,
+            convertIdentifier(renamed),
             t.stringLiteral(name.name),
             t.stringLiteral(cx.fnName),
             t.stringLiteral("recomputed"),
@@ -693,12 +849,10 @@ function codegenReactiveScope(
           ])
         )
       );
-      idempotenceDetectionStatements.push(
-        t.expressionStatement(t.assignmentExpression("=", name, slot))
-      );
     }
-    const condition = cx.synthesizeName("condition");
-    memoStatement = t.blockStatement([
+    const condition = cx.synthesizeName(`condition${cx.env.nextIdentifierId}`);
+
+    memoStatement = [
       ...computationBlock.body,
       t.variableDeclaration("let", [
         t.variableDeclarator(t.identifier(condition), testCondition),
@@ -714,11 +868,11 @@ function codegenReactiveScope(
       t.ifStatement(
         t.identifier(condition),
         t.blockStatement([
-          ...computationBlock.body,
+          ...idempotenceComputationBlock.body,
           ...idempotenceDetectionStatements,
         ])
       ),
-    ]);
+    ];
   } else {
     for (const { name, index, value } of cacheLoads) {
       cacheStoreStatements.push(
@@ -749,17 +903,17 @@ function codegenReactiveScope(
       );
     }
     computationBlock.body.push(...cacheStoreStatements);
-    memoStatement = t.ifStatement(
+    memoStatement = [t.ifStatement(
       testCondition,
       computationBlock,
       t.blockStatement(cacheLoadStatements)
-    );
+    )];
   }
 
   if (cx.env.config.enableMemoizationComments) {
     if (changeExpressionComments.length) {
       t.addComment(
-        memoStatement,
+        memoStatement[0],
         "leading",
         ` check if ${printDelimitedCommentList(
           changeExpressionComments,
@@ -768,20 +922,20 @@ function codegenReactiveScope(
         true
       );
       t.addComment(
-        memoStatement,
+        memoStatement[0],
         "leading",
         ` "useMemo" for ${printDelimitedCommentList(outputComments, "and")}:`,
         true
       );
     } else {
       t.addComment(
-        memoStatement,
+        memoStatement[0],
         "leading",
         " cache value with no dependencies",
         true
       );
       t.addComment(
-        memoStatement,
+        memoStatement[0],
         "leading",
         ` "useMemo" for ${printDelimitedCommentList(outputComments, "and")}:`,
         true
@@ -804,7 +958,7 @@ function codegenReactiveScope(
       );
     }
   }
-  statements.push(memoStatement);
+  statements.push(...memoStatement);
 
   const earlyReturnValue = scope.earlyReturnValue;
   if (earlyReturnValue !== null) {

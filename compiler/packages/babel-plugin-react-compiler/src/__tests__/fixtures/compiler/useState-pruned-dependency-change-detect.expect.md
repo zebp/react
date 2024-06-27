@@ -30,20 +30,17 @@ function Component(props) {
   }
   const [x] = useState(t0);
   let t1;
-  {
-    t1 = <div>{x}</div>;
-    let condition = $[1] !== x;
-    if (!condition) {
-      let old$t1 = $[2];
-      $structuralCheck(old$t1, t1, "t1", "Component", "cached", "(6:6)");
-    }
-    $[1] = x;
-    $[2] = t1;
-    if (condition) {
-      t1 = <div>{x}</div>;
-      $structuralCheck($[2], t1, "t1", "Component", "recomputed", "(6:6)");
-      t1 = $[2];
-    }
+  t1 = <div>{x}</div>;
+  let condition26 = $[1] !== x;
+  if (!condition26) {
+    let old$t1 = $[2];
+    $structuralCheck(old$t1, t1, "t1", "Component", "cached", "(6:6)");
+  }
+  $[1] = x;
+  $[2] = t1;
+  if (condition26) {
+    const t125idem = <div>{x}</div>;
+    $structuralCheck($[2], t125idem, "t1", "Component", "recomputed", "(6:6)");
   }
   return t1;
 }

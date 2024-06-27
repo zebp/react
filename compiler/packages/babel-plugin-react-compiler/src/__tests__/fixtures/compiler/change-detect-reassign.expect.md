@@ -23,22 +23,19 @@ function Component(props) {
   const $ = _c(2);
   let x = null;
   if (props.cond) {
-    {
-      x = [];
-      x.push(props.value);
-      let condition = $[0] !== props.value;
-      if (!condition) {
-        let old$x = $[1];
-        $structuralCheck(old$x, x, "x", "Component", "cached", "(3:6)");
-      }
-      $[0] = props.value;
-      $[1] = x;
-      if (condition) {
-        x = [];
-        x.push(props.value);
-        $structuralCheck($[1], x, "x", "Component", "recomputed", "(3:6)");
-        x = $[1];
-      }
+    x = [];
+    x.push(props.value);
+    let condition37 = $[0] !== props.value;
+    if (!condition37) {
+      let old$x = $[1];
+      $structuralCheck(old$x, x, "x", "Component", "cached", "(3:6)");
+    }
+    $[0] = props.value;
+    $[1] = x;
+    if (condition37) {
+      const x32idem = [];
+      x32idem.push(props.value);
+      $structuralCheck($[1], x32idem, "x", "Component", "recomputed", "(3:6)");
     }
   }
   return x;
