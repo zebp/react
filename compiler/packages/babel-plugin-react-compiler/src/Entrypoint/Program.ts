@@ -445,7 +445,7 @@ export function compileProgram(
     if (gating != null) {
       insertGatedFunctionDeclaration(originalFn, transformedFn, gating);
     } else {
-      originalFn.replaceWith(transformedFn);
+      originalFn.replaceWith(transformedFn).forEach((path) => path.scope.crawl());
     }
   }
 
@@ -468,6 +468,8 @@ export function compileProgram(
     }
     addImportsToProgram(program, externalFunctions);
   }
+
+  program.scope.crawl();
 }
 
 function getReactFunctionType(

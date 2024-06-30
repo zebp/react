@@ -40,7 +40,7 @@ export function insertGatedFunctionDeclaration(
       t.variableDeclaration("const", [
         t.variableDeclarator(fnPath.node.id, gatingExpression),
       ])
-    );
+    ).forEach((path) => path.scope.crawl());
   } else if (
     fnPath.parentPath.node.type === "ExportDefaultDeclaration" &&
     fnPath.node.type !== "ArrowFunctionExpression" &&
@@ -57,8 +57,10 @@ export function insertGatedFunctionDeclaration(
         ),
       ])
     );
+    fnPath.scope.crawl();
+    fnPath.parentPath.scope.crawl();
   } else {
-    fnPath.replaceWith(gatingExpression);
+    fnPath.replaceWith(gatingExpression).forEach((path) => path.scope.crawl());
   }
 }
 
